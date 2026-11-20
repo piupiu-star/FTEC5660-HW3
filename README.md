@@ -171,13 +171,198 @@ companies with the same tools and the same answer key rules, but different
 names and wording, and scores your 3 points only.
 
 ## Homework 3 solution:
-> to students: this is your report, see the homework description.
 
 ### My 3 points and rules
-> for each point: why you chose it, your PASS rule in one or two sentences, and the evidence it uses. Quote Fisher where it helps.
+
+I chose points 1, 5 and 11 because between them they force the agent to work
+from two kinds of evidence at once (two database points, one interview point),
+and because each of them has a line that can be drawn before any company is
+seen. The two database points are cheap and exact; the interview point answers
+something the accounts cannot.
+
+**Point 1 — "Does the company have products or services with sufficient market
+potential to make possible a sizable increase in sales for at least several
+years?"**
+
+*Why.* It is the gate every other point sits behind: potential that never turns
+into sales is not potential. It is also the point where management's own words
+are least trustworthy, because every letter to shareholders claims growth.
+
+*PASS rule.* PASS when revenue from FY2023 to FY2025 grew by more than the
+median firm in the company's own industry, i.e. when
+`(revenue_2025 / revenue_2023 - 1)` exceeds `industry_medians.revenue_growth_2y_pct`
+for that industry.
+
+*Evidence.* One SQL aggregate over `orders` for the two fiscal years, plus the
+`industry_medians` row. Note that the data ends in June 2026, so 2026 is never
+compared with a full year: the rule uses FY2023 and FY2025 only.
+
+*Why relative rather than absolute.* Fisher asks about potential "for at least
+several years", and the industry median is the only honest measure of whether a
+firm is capturing the potential that is demonstrably there. A firm that grows
+14% in an industry growing 22% is losing ground even though the number looks
+healthy.
+
+**Point 5 — "Does the company have a worthwhile profit margin?"**
+
+*Why.* It is the cleanest test of whether the business is worth owning, and it
+is the natural partner of point 1: growth bought with margin is not progress.
+
+*PASS rule.* PASS when the FY2025 operating margin,
+`(revenue - cost_of_sales - selling_admin - research_development) / revenue`,
+is above the industry median `operating_margin_pct`.
+
+*Evidence.* One SQL statement: revenue from `orders`, the three cost lines from
+`monthly_costs`, the median from `industry_medians`. The arithmetic happens in
+Python, never in the model.
+
+*Why not a fixed bar.* A fixed threshold (say 10%) gets the public companies
+wrong in both directions: Northwind Group earns 12.8% but its industry median is
+15.1%, while Everline Dynamics earns 6.3% against a 10.3% median. "Worthwhile"
+only means something relative to what the business is capable of earning.
+
+**Point 11 — "Are there other aspects of the business, somewhat peculiar to the
+industry involved, which will give the investor important clues as to how
+outstanding the company may be in relation to its competition?"**
+
+*Why.* It is the one chosen point that accounting cannot answer: an order book
+looks identical whether the product is unique or a commodity. Only the people on
+the other side of the table know, which is exactly what Fisher's scuttlebutt
+method is for.
+
+*PASS rule.* PASS when a competitor or a customer describes a durable advantage:
+switching is slow or costly, know-how or the installed base is hard to copy,
+rivals cannot match the performance, or customers who leave come back. FAIL when
+the same people describe a commodity: interchangeable products, buyers choosing
+on price, a rival who says nothing is hard to copy.
+
+*Evidence.* `interview("competitor", "competitive_edge")`, falling back to
+`interview("customer", "competitive_edge")` when the first person says they
+cannot comment. Two of the ten interviews are the most this point can ever cost.
 
 ### Design
-> a visualization of your agent design and one paragraph describing it.
+
+```
+                     four LangChain tools, one set per company
+   ┌───────────────┬───────────────┬────────────┬──────────────────┐
+   │ list_documents│ read_document │ sql_query  │    interview     │
+   └───────────────┴───────────────┴─────┬──────┴────────┬─────────┘
+        (not needed for these 3 points)  │               │
+                    ┌────────────────────┴───┐    ┌──────┴────────────────┐
+                    │ SQL_COMPANY            │    │ competitor            │
+                    │ SQL_REVENUE_GROWTH     │    │   -> customer         │
+                    │ SQL_OPERATING_MARGIN   │    │ (skip "cannot comment")│
+                    └────────────┬───────────┘    └──────┬────────────────┘
+                                 │                       │
+                    Python arithmetic + threshold        │  DeepSeek judge (JSON)
+                    compare with industry median         │        │
+                                 │                       │  DeepSeek reflection
+                                 │                       │  (independent second look)
+                    ┌────────────┴───────────────────────┴───┐
+                    │ evidence list with the verdicts fixed   │
+                    └────────────────────┬───────────────────┘
+                                         │  DeepSeek writes 2-3 sentences
+                                    results.csv (summary)
+```
+
+The pipeline is a router, not a chat. Every company is handled by
+`_analyze_one_company`: three SQL statements go through the `sql_query` tool and
+their numbers are compared with the industry median **in Python** — the model
+never sees a number it could recompute, which removes the single largest source
+of wrong verdicts. Point 11 takes the other branch: one targeted interview with
+the person listed as knowing the topic, one model call that must answer with
+JSON (`PASS`/`FAIL` plus a short reason), then a second model call that re-reads
+the quote without being told what to conclude and may replace the first verdict.
+The fixed verdicts and the evidence that produced them are then handed to a
+third model call whose only job is prose, under explicit instructions not to
+recompute or change anything. Companies run concurrently (semaphore of 4), each
+company is wrapped in `try/except`, and the model calls are wrapped again so
+a failed API call costs one point at most: the two SQL points and a summary
+built from the evidence are still written. `CHOSEN_POINTS`, the SQL and the
+thresholds are the only place the rules live; folder names, company names and
+public answers never appear in the code.
 
 ### Results
-> your point score on `public_test`, the companies where your verdicts disagree with the public answers, and why.
+
+Point score on `public_test` (3 consecutive runs):
+
+| run | point accuracy | balanced score | wall clock |
+| --- | --- | --- | --- |
+| 1 | 60 / 60 | **100.0%** | 23.7 s |
+| 2 | 60 / 60 | **100.0%** | 23.0 s |
+| 3 | 60 / 60 | **100.0%** | 23.5 s |
+
+Each run answers all 3 points on all 20 companies, uses exactly one interview
+per company (out of a budget of ten) and finishes in about 23 seconds, far inside
+the 30 minute limit.
+
+**Companies where my verdicts disagree with the public answers: none.** All
+three points agree with `ground_truth.json` on all 20 companies. That is the
+expected outcome rather than a lucky one: every point fails in exactly 6 of the
+20 companies in the answer key, and in the public data no company sits near the
+line of a relative rule. The closest calls are still comfortable — Kestrel
+Technologies grows 4.2% against a 9.8% median, Everline Dynamics earns 6.3%
+against 10.3% — so a small change in wording in the private set should not flip
+a verdict.
+
+**Negative control.** With an invalid API key (so every model call fails) the
+same code still finishes, still writes `results.csv`, and scores 54/60
+(balanced 83.3%): the two database points are fully correct and point 11 falls
+back to `PASS`. That is the behaviour I wanted — the expensive, uncertain part
+of the agent can fail without destroying the cheap, certain part.
+
+### What I would do differently
+
+A first version of point 3 (R&D effectiveness) compared the new-product share
+of revenue with the industry median and disagreed with 13 of the 20 public
+answers. The model could have written a persuasive paragraph for every one of
+those wrong verdicts: the failure was in the rule, not in the reasoning, and
+only the public answers exposed it. That is why the final rules are all
+relative to the industry row, and why every comparison is executed, not
+narrated.
+
+## Task 2: Reflection on AI sycophancy and AI psychosis
+
+*Sycophancy* is the model's tendency to agree with whatever framing it is
+given. *AI psychosis* is the more serious failure: the model keeps producing
+confident, self-consistent output that has lost contact with the world, and each
+step reinforces the last.
+
+**Sycophancy showed up in my own design, not in a hypothetical.** The
+reflection step is where it would have hurt: the cheap way to ask for a second
+opinion is "my colleague says FAIL, do you agree?", and a sycophantic model
+agrees about as often as it is asked. I deliberately did not do that. The
+verification prompt re-states the criterion — durable advantage versus
+commodity — and asks the model to read the quote on its own, and only afterwards
+compares with the first verdict. Even so, the second call can see the first
+verdict in its input, and that anchoring is a known cost of the design. A
+sceptical version would run the two judgements in parallel with no shared
+context and break ties with a third call. The same pressure exists one level up:
+once I had written "PASS means growth above the industry median", the model had
+every incentive to find growth above the median in the SQL output. I removed
+that possibility structurally by never letting the model see the numbers, and by
+making the verdict a two-line `if` in Python. Sycophancy needs a sentence to
+agree with; the deterministic layer does not speak.
+
+**AI psychosis is the failure I saw happen.** During development I ran the
+pipeline before the API key was valid. Every model call returned a 401, every
+company got the fallback `PASS` on the interview point, and the run still
+printed a tidy `results.csv` with a score of 83.3%. Nothing in the output looked
+wrong. A reader of that file would have concluded that thirteen companies have a
+durable advantage over their competitors, when in fact nothing had been
+observed at all. That is the mechanism: absence of evidence does not produce
+silence, it produces a plausible default, and the default becomes data for
+everything downstream. The same mechanism made the wrong point-3 rule look
+defensible for an afternoon, because each wrong verdict was locally coherent
+with its own evidence.
+
+**What actually defends against both.** Three things, in order of strength.
+First, an external check that the model cannot edit: `ground_truth.json` for the
+public set, and a deterministic rule for the private one. Second, keep the
+numbers away from the model. A model that cannot recompute a ratio cannot drift
+from it, and a rule that is executed in SQL or Python has no mood. Third, make
+the failure visible: the run prints the balanced score, each row lists the
+expected and predicted verdict, and the fallback path is written down instead of
+hidden in an exception. The uncomfortable lesson is that the agent's confidence
+and its correctness are produced by completely different parts of the pipeline,
+and only one of them is the model.
